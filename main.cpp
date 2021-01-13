@@ -3,14 +3,12 @@
 
 #include <iostream>
 #include <vector>
-#include <filesystem>
 #include <fstream>
+#include <unistd.h>
 
 using namespace std;
-namespace fs = filesystem;
 
 const string HOME = getenv("HOME");
-
 
 class ConsoleLogger {
     int verbose_level;
@@ -54,7 +52,7 @@ string readEntireFile(const string& file_path) {
     return file_contents;
 }
 
-// TODO: refactor into 'parsing SSH args' class
+bool file_exists (const string& path) { return access(path.c_str(), F_OK) != -1; }
 
 class ParseSSHArgs {
     int verbose = 0;
@@ -69,11 +67,9 @@ public:
                 expecting_value = false;
                 continue;
             }
-            if (arg[0] == '-' && arg.length() > 1) {
-                // arg is flag
-                if (arg[1] == 'v') {
-                    verbose++;
-                }
+            if (arg[0] == '-' && arg.length() > 1) { // arg is flag...
+                if (arg[1] == 'v') verbose++; // count verbose
+
                 if (argImpliesValueLater(arg))
                     // flag expects value
                     expecting_value = true;
@@ -117,21 +113,21 @@ public:
 };
 
 void callHookFamily(const string& prefix, const string& dest) {
-    fs::path path_to_pre_script = HOME + "/.ssh/" + prefix + ".d/" + dest;
+    string path_to_hook_script = HOME + "/.ssh/" + prefix + ".d/" + dest;
     string log_string = "";
-    if (fs::exists(path_to_pre_script)) {
+    if (file_exists(path_to_hook_script)) {
         log_string += "running ";
-        system(path_to_pre_script.c_str());
+        system(path_to_hook_script.c_str());
     } else {
         log_string += "no ";
     }
-    logger.log(log_string + prefix + ".d in: " + string(path_to_pre_script));
+    logger.log(log_string + prefix + ".d in: " + string(path_to_hook_script));
 
 }
 
 void handleSSHPass(GenSSHCommand& genSshCommand, const string& dest) {
-    fs::path path_to_sshpass_pw_file = HOME + "/.ssh/sshpass/" + dest;
-    if (fs::exists(path_to_sshpass_pw_file)) {
+    string path_to_sshpass_pw_file = HOME + "/.ssh/sshpass/" + dest;
+    if (file_exists(path_to_sshpass_pw_file)) {
         logger.log(string("sshpass password file found: ") + string(path_to_sshpass_pw_file));
         string pw = readEntireFile(path_to_sshpass_pw_file);
         setenv("SSHPASS", pw.c_str(), true);
@@ -150,8 +146,8 @@ int main(int argc, char** argv) {
         args.emplace_back(argv[i]);
         cout<<args[i];
     }
-    GenSSHCommand genSshCommand;
-    genSshCommand.add_args((args));
+    GenSSHCommand genSSHCommand;
+    genSSHCommand.add_args((args));
 
     ParseSSHArgs parseSSHArgs(args);
     string dest = parseSSHArgs.getSSHDest();
@@ -160,16 +156,15 @@ int main(int argc, char** argv) {
     if (not dest.empty()) {
         // we found SSH's destination! We can use this information to decide how to behave.
 
-        // handle SSH pass check if we have a SSH password and override genS
-        handleSSHPass(genSshCommand, dest);
+        // handle SSH pass check if we have a SSH password and tell genSSHCommand
+        handleSSHPass(genSSHCommand, dest);
         callHookFamily("pre", dest);
-        genSshCommand.run();
+        genSSHCommand.run();
         callHookFamily("post", dest);
     } else {
         // We run our SSH command without any tampering
-        genSshCommand.run();
+        genSSHCommand.run();
     }
-
 
     return 0;
 }
