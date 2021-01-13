@@ -5,10 +5,13 @@
 #include <vector>
 #include <fstream>
 #include <unistd.h>
+#include <algorithm>
 
 using namespace std;
 
-const string HOME = getenv("HOME");
+string getHome() {
+    return getenv("HOME");
+}
 
 class ConsoleLogger {
     int verbose_level;
@@ -18,7 +21,7 @@ public:
         verbose_level = level;
     }
 
-    void log(string line, int min_verbose_level = 1) {
+    void log(const string& line, int min_verbose_level = 1) const {
         if (verbose_level >= min_verbose_level)
             cout << "essh: " << line << endl;
     }
@@ -27,13 +30,13 @@ public:
 ConsoleLogger logger;
 
 bool argImpliesValueLater(const string& arg) {
+    // args specified in OpenSSH man page
     string value_arg_letters = "BbcDEeFIiJLlmOopQRSWw";
-    for (const auto& value_arg_letter: value_arg_letters) {
-        if (value_arg_letter == arg[1]) {
-            return true;
-        }
-    }
-    return false;
+
+    return any_of(value_arg_letters.begin(), value_arg_letters.end(),
+                  // [=] allows access to outer scope.
+                  [=](int i){ return i==arg[1]; }
+                  );
 }
 
 string readEntireFile(const string& file_path) {
@@ -52,13 +55,15 @@ string readEntireFile(const string& file_path) {
     return file_contents;
 }
 
-bool file_exists (const string& path) { return access(path.c_str(), F_OK) != -1; }
+bool file_exists (const string& path) {
+    return access(path.c_str(), F_OK) != -1;
+}
 
 class ParseSSHArgs {
     int verbose = 0;
     string ssh_destination;
 public:
-    ParseSSHArgs(const vector<string>& args) {
+    explicit ParseSSHArgs(const vector<string>& args) {
         bool expecting_value = false;
         for (const auto& arg: args) {
             if (arg.empty()) continue;
@@ -87,7 +92,7 @@ public:
 
 
 class GenSSHCommand {
-    string ssh_args = "";
+    string ssh_args;
     bool is_sshpass = false;
 public:
 
@@ -113,8 +118,8 @@ public:
 };
 
 void callHookFamily(const string& prefix, const string& dest) {
-    string path_to_hook_script = HOME + "/.ssh/" + prefix + ".d/" + dest;
-    string log_string = "";
+    string path_to_hook_script = getHome() + "/.ssh/" + prefix + ".d/" + dest;
+    string log_string;
     if (file_exists(path_to_hook_script)) {
         log_string += "running ";
         system(path_to_hook_script.c_str());
@@ -126,7 +131,7 @@ void callHookFamily(const string& prefix, const string& dest) {
 }
 
 void handleSSHPass(GenSSHCommand& genSshCommand, const string& dest) {
-    string path_to_sshpass_pw_file = HOME + "/.ssh/sshpass/" + dest;
+    string path_to_sshpass_pw_file = getHome() + "/.ssh/sshpass/" + dest;
     if (file_exists(path_to_sshpass_pw_file)) {
         logger.log(string("sshpass password file found: ") + string(path_to_sshpass_pw_file));
         string pw = readEntireFile(path_to_sshpass_pw_file);
@@ -137,14 +142,11 @@ void handleSSHPass(GenSSHCommand& genSshCommand, const string& dest) {
 
 int main(int argc, char** argv) {
     // could do this more efficiently in C, but I don't care enough.
-    vector<string> args(10);
+    vector<string> args;
     // skips first string via init i at 1 (call path)
     // iterate over all, and convert to string because lazy.
     for (int i=1;i<argc;i++) {
-        // probably something wrong with this approach, given that it generates lots of empty str args in the vector
-        // TODO: investigate and fix
         args.emplace_back(argv[i]);
-        cout<<args[i];
     }
     GenSSHCommand genSSHCommand;
     genSSHCommand.add_args((args));
