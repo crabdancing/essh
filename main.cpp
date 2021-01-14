@@ -13,7 +13,7 @@ using namespace std;
 
 /* ConsoleLogger allows us to easily log to stderr and handle logLine levels concisely.
  * We must declare and initialize it first so that it can be used anywhere else in our code.
- * TODO: add support for inserters with logger class. */
+ * TODO: add support for inserters or format strings with logger class. */
 class ConsoleLogger {
     int verbose_level;
 
@@ -23,8 +23,9 @@ public:
     }
 
     void logLine(const string& line, int min_verbose_level = 1) const {
-        if (verbose_level >= min_verbose_level)
+        if (verbose_level >= min_verbose_level) {
             cerr << "essh: " << line << endl;
+        }
     }
 
     /* Sloppy alternative to figuring out how to elegantly do the stream class properly. */
@@ -111,7 +112,7 @@ vector<string> cargsToStringArgs(int argc, char **argv) {
 }
 
 /* Read in SSH args and figure out the stuff we're interested in.
- * (e.g., should we switch to verbose mode? What is the destination?) */
+ * (i.e., should we switch to verbose mode? What is the destination?) */
 class SSHArgs {
     int verbose = 0;
     string ssh_dest;
@@ -182,15 +183,14 @@ public:
 /* Responsible for storing the configuration we want for our SSH/SSHPASS command,
  * and finally running it when it's time. */
 class GenSSHCommand {
-    string ssh_args, pw;
+    ostringstream ssh_args;
+    string pw;
 public:
 
-    void add_arg(const string& arg) {
-        ssh_args += " " + arg;
-    }
-
     void add_args(const vector<string>& args) {
-        for (const auto& arg:args) add_arg(arg);
+        for (const auto& arg:args) {
+            ssh_args << " " << arg;
+        }
     }
 
     void setSSHPass(string password) {
@@ -198,14 +198,15 @@ public:
     }
 
     void run() {
-        string ssh_cmd = "ssh";
+        ostringstream ssh_cmd;
+        ssh_cmd << "ssh";
         if (not pw.empty()) {
-            ssh_cmd += "pass -e ssh";
+            ssh_cmd << "pass -e ssh";
             // Se our env var to give `sshpass` utility our password.
             setenv("SSHPASS", pw.c_str(), true);
         }
-        ssh_cmd += ssh_args;
-        system(ssh_cmd.c_str());
+        ssh_cmd << ssh_args.str();
+        system(ssh_cmd.str().c_str());
     }
 };
 
@@ -232,8 +233,9 @@ int main(int argc, char** argv) {
     if (not dest.empty()) { // we found SSH's destination!
         // handle SSH pass check if we have a SSH password
         string pass_path = getSSHPassPath(dest);
-        if (not pass_path.empty())
+        if (not pass_path.empty()) {
             genSSHCommand.setSSHPass(pass_path);
+        }
         // Run the pre-SSH hook
         callHookFamily("pre", dest);
         // Run SSH itself
