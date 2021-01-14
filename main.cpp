@@ -23,21 +23,11 @@ public:
 
     void log(const string& line, int min_verbose_level = 1) const {
         if (verbose_level >= min_verbose_level)
-            cout << "essh: " << line << endl;
+            cerr << "essh: " << line << endl;
     }
 };
 
 ConsoleLogger logger;
-
-bool argImpliesValueLater(const string& arg) {
-    // args specified in OpenSSH man page
-    string value_arg_letters = "BbcDEeFIiJLlmOopQRSWw";
-
-    return any_of(value_arg_letters.begin(), value_arg_letters.end(),
-                  // [=] allows access to outer scope.
-                  [=](int i){ return i==arg[1]; }
-                  );
-}
 
 string readEntireFile(const string& file_path) {
     streampos size;
@@ -62,30 +52,65 @@ bool file_exists (const string& path) {
 class ParseSSHArgs {
     int verbose = 0;
     string ssh_destination;
+    bool expecting_value = false;
+
+
+    static bool flagIsVerbose(char flag) {
+        return flag == 'v';
+    }
+
+    static bool flagImpliesValueLater(char flag) {
+        const string value_arg_letters = "BbcDEeFIiJLlmOopQRSWw";
+        return any_of(
+                value_arg_letters.begin(),
+                value_arg_letters.end(),
+                [=](char letter) {
+                    return letter == flag;
+                });
+    }
+
+
+    void parseFlagArg(const string& arg) {
+        // args specified in OpenSSH man page
+        auto it = arg.begin();
+        ++it; // skip the '-' char
+        for (; it != arg.end(); ++it) {
+            if (flagImpliesValueLater(*it)) {
+                logger.log(string("Flag ") + *it + "implies value later.");
+                expecting_value = true;
+            }
+            if (flagIsVerbose(*it)) {
+                ++verbose;
+            }
+        }
+    }
+
 public:
     explicit ParseSSHArgs(const vector<string>& args) {
-        bool expecting_value = false;
         for (const auto& arg: args) {
+            // skip empty args
             if (arg.empty()) continue;
+
             if (expecting_value) {
                 // previous arg is flag expecting value
                 expecting_value = false;
+                // skip this value -- it's SSH's problem.
                 continue;
             }
-            if (arg[0] == '-' && arg.length() > 1) { // arg is flag...
-                if (arg[1] == 'v') verbose++; // count verbose
 
-                if (argImpliesValueLater(arg))
-                    // flag expects value
-                    expecting_value = true;
+            if (arg[0] == '-' && arg.length() > 1) {
+                // Handle arg as flag...
+                parseFlagArg(arg);
                 continue;
             }
+
             if (ssh_destination.empty()) {
                 // THIS argument is special!
                 ssh_destination = arg;
             }
         }
     }
+
     string getSSHDest() { return ssh_destination; }
     [[nodiscard]] int verboseMode() const { return verbose; }
 };
@@ -140,31 +165,49 @@ void handleSSHPass(GenSSHCommand& genSshCommand, const string& dest) {
     }
 }
 
-int main(int argc, char** argv) {
-    // could do this more efficiently in C, but I don't care enough.
+
+vector<string> cargsToStringArgs(int argc, char** argv) {
     vector<string> args;
     // skips first string via init i at 1 (call path)
     // iterate over all, and convert to string because lazy.
     for (int i=1;i<argc;i++) {
         args.emplace_back(argv[i]);
     }
-    GenSSHCommand genSSHCommand;
-    genSSHCommand.add_args((args));
+    return args;
+}
 
+int main(int argc, char** argv) {
+    // Convert args to std::string
+    vector<string> args = cargsToStringArgs(argc, argv);
+
+    // GenSSHCommand is responsible for tracking our configuration params
+    // of the command and doing the final generation
+    GenSSHCommand genSSHCommand;
+    // Tell it what our args are, so we can pass them exactly to SSH.
+    genSSHCommand.add_args(args);
+
+    // ParseSSHArgs allows us to figure out things like whether
+    // -v has been passed, or which flag is the destination
     ParseSSHArgs parseSSHArgs(args);
     string dest = parseSSHArgs.getSSHDest();
-    logger.setVerbose(parseSSHArgs.verboseMode());
-    logger.log("verbose mode activated through -v flag.");
-    if (not dest.empty()) {
-        // we found SSH's destination! We can use this information to decide how to behave.
 
+    // Verbosity is a count of the number of -v flags passed
+    logger.setVerbose(parseSSHArgs.verboseMode());
+    // log statements default to verbosity 1.
+    logger.log("verbose mode activated through -v flag.");
+
+    if (not dest.empty()) { // we found SSH's destination!
         // handle SSH pass check if we have a SSH password and tell genSSHCommand
         handleSSHPass(genSSHCommand, dest);
+        // Run the pre-SSH hook
         callHookFamily("pre", dest);
+        // Run SSH itself
         genSSHCommand.run();
+        // Run the post-SSH hook
         callHookFamily("post", dest);
     } else {
-        // We run our SSH command without any tampering
+        // No dest found? Maybe we messed up the parsing somewhere...
+        // We default to running our SSH command without any tampering
         genSSHCommand.run();
     }
 
