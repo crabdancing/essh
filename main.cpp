@@ -2,17 +2,18 @@
 // GNU GPLv3
 
 #include <iostream>
+#include <utility>
 #include <vector>
 #include <fstream>
 #include <unistd.h>
 #include <algorithm>
+#include <sstream>
 
 using namespace std;
 
-string getHome() {
-    return getenv("HOME");
-}
-
+/* ConsoleLogger allows us to easily log to stderr and handle logLine levels concisely.
+ * We must declare and initialize it first so that it can be used anywhere else in our code.
+ * TODO: add support for inserters with logger class. */
 class ConsoleLogger {
     int verbose_level;
 
@@ -21,19 +22,36 @@ public:
         verbose_level = level;
     }
 
-    void log(const string& line, int min_verbose_level = 1) const {
+    void logLine(const string& line, int min_verbose_level = 1) const {
         if (verbose_level >= min_verbose_level)
             cerr << "essh: " << line << endl;
+    }
+
+    /* Sloppy alternative to figuring out how to elegantly do the stream class properly. */
+    void logLine(ostringstream& line_stream, int min_verbose_level = 1) const {
+        logLine(line_stream.str(), min_verbose_level);
     }
 };
 
 ConsoleLogger logger;
 
+/* User home path, obvs. */
+string getHome() {
+    return getenv("HOME");
+}
+
+/* Reads entire file into memory.
+ * Do not use this on large files, obvs. */
 string readEntireFile(const string& file_path) {
     streampos size;
     char *file_contents = nullptr;
 
-    ifstream file (file_path, ios::in|ios::binary|ios::ate);
+    ifstream file (file_path,
+                   ios::in | // read in file
+                   ios::binary | // open as binary in case we have non-ASCII values.
+                   ios::ate // seek to end so we can tell how long the file is with tellg()
+    );
+
     if (file.is_open())
     {
         size = file.tellg();
@@ -42,18 +60,62 @@ string readEntireFile(const string& file_path) {
         file.read (file_contents, size);
         file.close();
     }
-    return file_contents;
+
+    string retval = file_contents;
+    delete[] file_contents;
+    return retval;
 }
 
-bool file_exists (const string& path) {
+/* poor woman's filesystem::exists() for c++14 */
+bool fileExists (const string& path) {
     return access(path.c_str(), F_OK) != -1;
 }
 
-class ParseSSHArgs {
-    int verbose = 0;
-    string ssh_destination;
-    bool expecting_value = false;
 
+/* Check whether we have a sshpass password file matching dest. Give us this path.
+ * If it doesn't exist, give us empty string. */
+string getSSHPassPath(const string& dest) {
+    string path_to_sshpass_pw_file = getHome() + "/.ssh/sshpass/" + dest;
+    if (fileExists(path_to_sshpass_pw_file)) {
+        logger.logLine(string("sshpass password file found: ") + string(path_to_sshpass_pw_file));
+        string pw = readEntireFile(path_to_sshpass_pw_file);
+        return path_to_sshpass_pw_file;
+    }
+    return "";
+}
+
+
+void callHookFamily(const string& prefix, const string& dest) {
+    ostringstream path_to_hook_script;
+    path_to_hook_script << getHome() << "/.ssh/" << prefix << ".d/" << dest;
+    string log_string;
+    if (fileExists(path_to_hook_script.str())) {
+        log_string += "running ";
+        system(path_to_hook_script.str().c_str());
+    } else {
+        log_string += "no ";
+    }
+    ostringstream log;
+    log << log_string  << prefix << ".d in: " << path_to_hook_script.str();
+    logger.logLine(log.str());
+}
+
+vector<string> cargsToStringArgs(int argc, char **argv) {
+    vector<string> args;
+    // skips first string via init i at 1 (call path)
+    // iterate over all, and convert to string because lazy.
+    for (int i=1;i<argc;i++) {
+        args.emplace_back(argv[i]);
+    }
+    return args;
+}
+
+/* Read in SSH args and figure out the stuff we're interested in.
+ * (e.g., should we switch to verbose mode? What is the destination?) */
+class SSHArgs {
+    int verbose = 0;
+    string ssh_dest;
+    bool expecting_value = false;
 
     static bool flagIsVerbose(char flag) {
         return flag == 'v';
@@ -69,14 +131,15 @@ class ParseSSHArgs {
                 });
     }
 
-
     void parseFlagArg(const string& arg) {
         // args specified in OpenSSH man page
         auto it = arg.begin();
         ++it; // skip the '-' char
         for (; it != arg.end(); ++it) {
             if (flagImpliesValueLater(*it)) {
-                logger.log(string("Flag ") + *it + "implies value later.");
+                ostringstream log;
+                log << "Flag " << *it << " implies value later.";
+                logger.logLine(log);
                 expecting_value = true;
             }
             if (flagIsVerbose(*it)) {
@@ -86,7 +149,7 @@ class ParseSSHArgs {
     }
 
 public:
-    explicit ParseSSHArgs(const vector<string>& args) {
+    explicit SSHArgs(const vector<string>& args) {
         for (const auto& arg: args) {
             // skip empty args
             if (arg.empty()) continue;
@@ -104,21 +167,22 @@ public:
                 continue;
             }
 
-            if (ssh_destination.empty()) {
+            if (ssh_dest.empty()) {
                 // THIS argument is special!
-                ssh_destination = arg;
+                ssh_dest = arg;
             }
         }
     }
 
-    string getSSHDest() { return ssh_destination; }
-    [[nodiscard]] int verboseMode() const { return verbose; }
+    string getDest() { return ssh_dest; }
+    int getVerbose() const { return verbose; }
 };
 
 
+/* Responsible for storing the configuration we want for our SSH/SSHPASS command,
+ * and finally running it when it's time. */
 class GenSSHCommand {
-    string ssh_args;
-    bool is_sshpass = false;
+    string ssh_args, pw;
 public:
 
     void add_arg(const string& arg) {
@@ -129,52 +193,21 @@ public:
         for (const auto& arg:args) add_arg(arg);
     }
 
-    void setSSHPass(bool value) {
-        this->is_sshpass = value;
+    void setSSHPass(string password) {
+        pw = move(password);
     }
 
     void run() {
         string ssh_cmd = "ssh";
-        if (is_sshpass)
+        if (not pw.empty()) {
             ssh_cmd += "pass -e ssh";
+            // Se our env var to give `sshpass` utility our password.
+            setenv("SSHPASS", pw.c_str(), true);
+        }
         ssh_cmd += ssh_args;
         system(ssh_cmd.c_str());
     }
 };
-
-void callHookFamily(const string& prefix, const string& dest) {
-    string path_to_hook_script = getHome() + "/.ssh/" + prefix + ".d/" + dest;
-    string log_string;
-    if (file_exists(path_to_hook_script)) {
-        log_string += "running ";
-        system(path_to_hook_script.c_str());
-    } else {
-        log_string += "no ";
-    }
-    logger.log(log_string + prefix + ".d in: " + string(path_to_hook_script));
-
-}
-
-void handleSSHPass(GenSSHCommand& genSshCommand, const string& dest) {
-    string path_to_sshpass_pw_file = getHome() + "/.ssh/sshpass/" + dest;
-    if (file_exists(path_to_sshpass_pw_file)) {
-        logger.log(string("sshpass password file found: ") + string(path_to_sshpass_pw_file));
-        string pw = readEntireFile(path_to_sshpass_pw_file);
-        setenv("SSHPASS", pw.c_str(), true);
-        genSshCommand.setSSHPass(true);
-    }
-}
-
-
-vector<string> cargsToStringArgs(int argc, char** argv) {
-    vector<string> args;
-    // skips first string via init i at 1 (call path)
-    // iterate over all, and convert to string because lazy.
-    for (int i=1;i<argc;i++) {
-        args.emplace_back(argv[i]);
-    }
-    return args;
-}
 
 int main(int argc, char** argv) {
     // Convert args to std::string
@@ -186,19 +219,21 @@ int main(int argc, char** argv) {
     // Tell it what our args are, so we can pass them exactly to SSH.
     genSSHCommand.add_args(args);
 
-    // ParseSSHArgs allows us to figure out things like whether
+    // SSHArgs allows us to figure out things like whether
     // -v has been passed, or which flag is the destination
-    ParseSSHArgs parseSSHArgs(args);
-    string dest = parseSSHArgs.getSSHDest();
+    SSHArgs parseSSHArgs(args);
+    string dest = parseSSHArgs.getDest();
 
     // Verbosity is a count of the number of -v flags passed
-    logger.setVerbose(parseSSHArgs.verboseMode());
-    // log statements default to verbosity 1.
-    logger.log("verbose mode activated through -v flag.");
+    logger.setVerbose(parseSSHArgs.getVerbose());
+    // logLine statements default to verbosity 1.
+    logger.logLine("verbose mode activated through -v flag.");
 
     if (not dest.empty()) { // we found SSH's destination!
-        // handle SSH pass check if we have a SSH password and tell genSSHCommand
-        handleSSHPass(genSSHCommand, dest);
+        // handle SSH pass check if we have a SSH password
+        string pass_path = getSSHPassPath(dest);
+        if (not pass_path.empty())
+            genSSHCommand.setSSHPass(pass_path);
         // Run the pre-SSH hook
         callHookFamily("pre", dest);
         // Run SSH itself
